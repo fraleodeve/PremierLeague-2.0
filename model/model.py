@@ -1,5 +1,4 @@
-import itertools
-from collections import defaultdict
+import copy
 
 import networkx as nx
 from database.DAO import DAO
@@ -9,63 +8,98 @@ class Model:
     def __init__(self):
         self._grafo = nx.DiGraph()
 
-        self._dictSquadre = {}
-        self._dictClassifica = defaultdict(int)
+        self._idMapGiocatori = {}
+        for el in DAO.getAllGiocatori():
+            self._idMapGiocatori[el.PlayerID] = el
 
-    def getAllSquadre(self):
-        squadre = DAO.getAllSquadre()
-        squadre.sort(key=lambda x: x.Name)
-        return squadre
+        self._bestPath = []
+        self._bestScore = 0
 
-    def buildGraph(self):
+    def getBestPath(self, k):
+        self._bestPath = []
+        self._bestScore = 0
+
+        self.ricorsione([], k)
+
+        return self._bestPath, self._bestScore
+
+    def ricorsione(self, parziale, k):
+        if len(parziale) == k:
+            if self.gradoTitolarita(parziale) > self._bestScore:
+                self._bestPath = copy.deepcopy(parziale)
+                self._bestScore = self.gradoTitolarita(parziale)
+
+        if len(parziale) == k:
+            return
+
+        nodiVietati = []
+        for el in parziale:
+            for e in self._grafo.out_edges(el):
+                nodiVietati.append(e[1])
+            # nodiVietati.append(self._grafo.out_edges(el))
+
+        for n in self._grafo.nodes():
+            if n not in parziale and n not in nodiVietati:
+                parziale.append(n)
+                self.ricorsione(parziale, k)
+                parziale.pop()
+
+    def gradoTitolarita(self, parziale):
+        score = 0
+        for n in parziale:
+            for e in self._grafo.out_edges(n, data=True):
+                score += e[2]["weight"]
+            for e in self._grafo.in_edges(n, data=True):
+                score -= e[2]["weight"]
+        return score
+
+    def buildGraph(self, goal: float):
         self._grafo.clear()
+        media = DAO.getMedia(goal)
+        for el in media:
+            self._grafo.add_node(self._idMapGiocatori[el.PlayerID])
 
-        squadre = DAO.getAllSquadre()
-        for el in squadre:
-            self._dictSquadre[el.TeamID] = el
-        self._grafo.add_nodes_from(squadre)
+        myEdges = DAO.getEdges(goal)
 
-        self.classifica()
+        lista = []
+        for el in myEdges:
+            if el.minuti > 0:
+                lista.append((el.p1, el.p2, el.minuti))
+            if el.minuti < 0:
+                valore = - el.minuti
+                lista.append((el.p2, el.p1, valore))
 
-        myEdges = []
-        for el in DAO.getAllPartite():
-            myEdges.append((self._dictSquadre[el.TeamHomeID], self._dictSquadre[el.TeamAwayID]))
-        for ed in myEdges:
-            if self._dictClassifica[ed[0].TeamID] > self._dictClassifica[ed[1].TeamID]:
-                self._grafo.add_edge(ed[0], ed[1], weight = self._dictClassifica[ed[0].TeamID] - self._dictClassifica[ed[1].TeamID])
-            elif self._dictClassifica[ed[0].TeamID] > self._dictClassifica[ed[1].TeamID]:
-                self._grafo.add_edge(ed[1], ed[0], weight = self._dictClassifica[ed[1].TeamID] - self._dictClassifica[ed[0].TeamID])
+        for el in lista:
+            giocatore1 = self._idMapGiocatori[el[0]]
+            giocatore2 = self._idMapGiocatori[el[1]]
+            if self._grafo.has_edge(giocatore1, giocatore2):
+                self._grafo[giocatore1][giocatore2]["weight"] += el[2]
+            elif self._grafo.has_edge(giocatore2, giocatore1):
+                self._grafo[giocatore2][giocatore1]["weight"] -= el[2]
+            else:
+                self._grafo.add_edge(giocatore1, giocatore2, weight = el[2])
 
-    def classifica(self):
-        partite = DAO.getAllPartite()
-        for el in partite:
-            if el.ResultOfTeamHome == 1:
-                self._dictClassifica[el.TeamHomeID] += 3
-            if el.ResultOfTeamHome == 0:
-                self._dictClassifica[el.TeamAwayID] += 1
-                self._dictClassifica[el.TeamHomeID] += 1
-            if el.ResultOfTeamHome == -1:
-                self._dictClassifica[el.TeamAwayID] += 3
+        for u, v, data in list(self._grafo.edges(data=True)):
+            if data["weight"] < 0:
+                peso = -data["weight"]
+                self._grafo.remove_edge(u, v)
+                self._grafo.add_edge(v, u, weight=peso)
 
-    def getPunti(self, s):
-        listaSup = []
-        listaInf = []
-        squadra = self.getSquadra(s)
-        for key, val in self._dictClassifica.items():
-            if key != squadra.TeamID and self._dictClassifica[squadra.TeamID] > val:
-                listaInf.append((self._dictSquadre[key].Name, self._dictClassifica[squadra.TeamID] - val))
-            if key != squadra.TeamID and self._dictClassifica[squadra.TeamID] < val:
-                listaSup.append((self._dictSquadre[key].Name, val - self._dictClassifica[squadra.TeamID]))
-        listaSup.sort(key=lambda x: x[1])
-        listaInf.sort(key=lambda x: x[1])
-        return listaSup, listaInf
+    def getNodoMaggiore(self):
+        lista = []
+        for n in self._grafo.nodes():
+            score = self._grafo.out_degree(n)
+            lista.append((n, score))
+        lista.sort(key = lambda x: x[1], reverse = True)
+        output = []
+        for el in self._grafo.out_edges(lista[0][0], data = True):
+            output.append((el[1], el[2]["weight"]))
+        output.sort(key = lambda x: x[1], reverse = True)
+        return lista[0][0], output
 
     def getDetails(self):
         return len(self._grafo.nodes), len(self._grafo.edges)
 
-    def getSquadra(self, s):
-        for el in DAO.getAllSquadre():
-            if el.Name == s:
-                return self._dictSquadre[el.TeamID]
-        return None
+
+
 
